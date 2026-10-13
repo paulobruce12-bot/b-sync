@@ -475,6 +475,24 @@
     text-align: center; margin: 20px 0 0;
   }
 
+  .merge-choice {
+    background: var(--surface-glass);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background .15s, border-color .15s, transform .1s;
+    color: var(--text);
+  }
+  .merge-choice:hover { background: rgba(255,255,255,0.06); border-color: var(--border-strong); }
+  .merge-choice:active { transform: scale(0.98); }
+  .merge-head { font-weight: 700; margin-bottom: 6px; font-size: 14px; }
+  .merge-stats { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+
   @media (max-width: 500px) {
     .app { padding: 16px 16px 0; }
     .page-title { font-size: 22px; }
@@ -708,7 +726,7 @@ async function signOut() {
   // clear local data so next login starts fresh
   try { localStorage.removeItem(STORAGE_KEY); } catch {}
   data = getDefaultData();
-boot();
+  render();
 }
 
 function translateAuthError(msg) {
@@ -727,7 +745,7 @@ function translateAuthError(msg) {
 async function boot() {
   if (!sb) {
     // No Supabase — fall back to local-only mode
-boot();
+    render();
     return;
   }
   const { data: sessionData } = await sb.auth.getSession();
@@ -742,41 +760,45 @@ boot();
   // Logged in: check cloud vs local
   await handleFirstLoginMerge();
   startRealtimeChannel();
-boot();
+  render();
   setCloudStatus('synced');
 }
 
 async function handleFirstLoginMerge() {
   const cloudRow = await pullFromCloud();
-  const localHasData = (data.transactions||[]).length > 0 ||
-                       (data.tasks||[]).length > 0 ||
-                       (data.envelopes||[]).length > 0 ||
-                       (data.fixedItems||[]).length > 0;
-  const cloudHasData = cloudRow && cloudRow.data && (
-    (cloudRow.data.transactions||[]).length > 0 ||
-    (cloudRow.data.tasks||[]).length > 0 ||
-    (cloudRow.data.envelopes||[]).length > 0 ||
-    (cloudRow.data.fixedItems||[]).length > 0
-  );
+  const localCounts = countOf(data);
+  const cloudCounts = cloudRow && cloudRow.data ? countOf(cloudRow.data) : { tx:0, tasks:0, env:0, fix:0 };
+  const localHasData = localCounts.tx || localCounts.tasks || localCounts.env || localCounts.fix;
+  const cloudHasData = cloudCounts.tx || cloudCounts.tasks || cloudCounts.env || cloudCounts.fix;
 
   if (!cloudHasData && localHasData) {
-    // Upload local to cloud
     await pushToCloud();
-  } else if (cloudHasData && !localHasData) {
-    // Download cloud to local
+    return;
+  }
+  if (cloudHasData && !localHasData) {
     await applyCloudData(cloudRow.data, cloudRow.updated_at);
-  } else if (cloudHasData && localHasData) {
-    // Ask user which to keep
+    return;
+  }
+  if (cloudHasData && localHasData) {
+    // If counts match, data is likely identical — skip the dialog and prefer cloud
+    const identical = localCounts.tx === cloudCounts.tx
+                   && localCounts.tasks === cloudCounts.tasks
+                   && localCounts.env === cloudCounts.env
+                   && localCounts.fix === cloudCounts.fix;
+    if (identical) {
+      await applyCloudData(cloudRow.data, cloudRow.updated_at);
+      return;
+    }
     const chose = await askMergeChoice(cloudRow.data, data);
     if (chose === 'cloud') {
       await applyCloudData(cloudRow.data, cloudRow.updated_at);
     } else {
       await pushToCloud();
     }
-  } else {
-    // Both empty — nothing to do; next save will push
-    lastKnownUpdatedAt = cloudRow?.updated_at || null;
+    return;
   }
+  // Both empty
+  lastKnownUpdatedAt = cloudRow?.updated_at || null;
 }
 
 function countOf(d) {
@@ -793,25 +815,41 @@ function askMergeChoice(cloudData, localData) {
     const c = countOf(cloudData), l = countOf(localData);
     const body = `
       <p style="margin:0 0 8px">Você tem dados em dois lugares. Qual quer usar?</p>
-      <div class="grid grid-2">
-        <div class="card" style="cursor:pointer; padding:14px" id="chCloud">
-          <div style="font-weight:700; color:var(--mint); margin-bottom:6px">☁️ Nuvem</div>
-          <div style="font-size:12px; color:var(--text-muted)">
+      <div class="grid grid-2" style="margin-top:8px">
+        <button type="button" class="merge-choice" data-choice="cloud">
+          <div class="merge-head" style="color:var(--mint)">☁️ Nuvem</div>
+          <div class="merge-stats">
             ${c.tx} transações<br>${c.tasks} tarefas<br>${c.env} caixinhas<br>${c.fix} fixos
           </div>
-        </div>
-        <div class="card" style="cursor:pointer; padding:14px" id="chLocal">
-          <div style="font-weight:700; color:var(--elec); margin-bottom:6px">💾 Deste aparelho</div>
-          <div style="font-size:12px; color:var(--text-muted)">
+        </button>
+        <button type="button" class="merge-choice" data-choice="local">
+          <div class="merge-head" style="color:var(--elec)">💾 Deste aparelho</div>
+          <div class="merge-stats">
             ${l.tx} transações<br>${l.tasks} tarefas<br>${l.env} caixinhas<br>${l.fix} fixos
           </div>
-        </div>
+        </button>
       </div>
-      <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0">A escolha substitui o que estiver no outro lado. Faça um backup antes se tiver dúvida.</p>
+      <p style="font-size:11px; color:var(--text-muted); margin:12px 0 0">A escolha substitui o que estiver no outro lado.</p>
     `;
     const m = openModal('Qual versão usar?', body, '');
-    m.querySelector('#chCloud').onclick = () => { m.remove(); resolve('cloud'); };
-    m.querySelector('#chLocal').onclick = () => { m.remove(); resolve('local'); };
+    let resolved = false;
+    const done = (choice) => {
+      if (resolved) return;
+      resolved = true;
+      try { document.querySelectorAll('.modal-backdrop').forEach(el => el.remove()); } catch {}
+      resolve(choice);
+    };
+    m.querySelectorAll('[data-choice]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        done(btn.dataset.choice);
+      });
+    });
+    // If user closes with X, default to cloud (safer)
+    m.querySelectorAll('[data-close]').forEach(btn => {
+      btn.addEventListener('click', () => done('cloud'));
+    });
   });
 }
 
@@ -887,7 +925,7 @@ function renderLogin() {
       currentUser = session?.user || null;
       await handleFirstLoginMerge();
       startRealtimeChannel();
-boot();
+      render();
       setCloudStatus('synced');
     } catch (ex) {
       errEl.textContent = translateAuthError(ex.message);
